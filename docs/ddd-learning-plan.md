@@ -390,28 +390,215 @@ sequenceDiagram
 
 ---
 
+## TDD での進め方
+
+### 基本サイクル
+
+```
+🔴 Red    → まずテストを書く（コンパイルエラーになってよい）
+🟢 Green  → テストが通る最小限の実装を書く
+🔵 Refactor → コードを整理する（テストは通したまま）
+```
+
+### DDDとTDDの相性
+
+ドメイン層（値オブジェクト・集約）はDBや外部依存がないため、**ユニットテストが最も書きやすい場所**です。  
+「テストを先に書く」ことで、ドメインの振る舞いを先に言語化できます。
+
+### テストの種類と配置
+
+```
+src/test/java/
+  └─ domain/           ← ユニットテスト（DBなし・Springなし）★ メインの練習場所
+       model/
+         stock/
+           StockTest.java
+           QuantityTest.java
+         reservation/
+           ReservationTest.java
+  └─ application/      ← ユニットテスト（Repositoryをモック化）
+       usecase/
+         ReserveStockUseCaseTest.java
+  └─ adapter/          ← 統合テスト（Spring起動）
+       web/
+         StockControllerTest.java
+```
+
+### 各UCのTDD進め方
+
+---
+
+#### UC-01 `Quantity` のTDDフロー
+
+**🔴 Step 1: まずテストを書く**
+
+```java
+// QuantityTest.java
+class QuantityTest {
+
+    @Test
+    void 正の数量を生成できる() {
+        Quantity qty = new Quantity(5);
+        assertThat(qty.value()).isEqualTo(5);
+    }
+
+    @Test
+    void ゼロはNG() {
+        assertThatThrownBy(() -> new Quantity(0))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 負の数はNG() {
+        assertThatThrownBy(() -> new Quantity(-1))
+            .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void 数量を加算できる() {
+        Quantity result = new Quantity(3).add(new Quantity(2));
+        assertThat(result.value()).isEqualTo(5);
+    }
+
+    @Test
+    void 不足分を減算するとエラー() {
+        assertThatThrownBy(() -> new Quantity(3).subtract(new Quantity(5)))
+            .isInstanceOf(IllegalStateException.class);
+    }
+}
+```
+
+**🟢 Step 2: テストが通る実装を書く**  
+→ `Quantity` レコードを実装する
+
+**🔵 Step 3: リファクタリング**  
+→ `Stock.reserve()` / `Reservation` を `Quantity` に置き換える
+
+---
+
+#### UC-02 出荷確定のTDDフロー
+
+**🔴 Step 1: 状態遷移のテストを先に書く**
+
+```java
+// ReservationTest.java
+class ReservationTest {
+
+    @Test
+    void 予約済み状態から出荷確定できる() {
+        Reservation reservation = /* RESERVED状態のオブジェクト */;
+        reservation.ship();
+        assertThat(reservation.getStatus()).isEqualTo(ReservationStatus.SHIPPED);
+    }
+
+    @Test
+    void キャンセル済みは出荷できない() {
+        Reservation reservation = /* CANCELED状態のオブジェクト */;
+        assertThatThrownBy(() -> reservation.ship())
+            .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void 出荷済みはキャンセルできない() {
+        Reservation reservation = /* SHIPPED状態のオブジェクト */;
+        assertThatThrownBy(() -> reservation.cancel())
+            .isInstanceOf(IllegalStateException.class);
+    }
+}
+
+// StockTest.java
+class StockTest {
+
+    @Test
+    void 出荷確定で在庫数と予約数が減る() {
+        Stock stock = new Stock(new ProductId("P-001"), 100, 5);
+        stock.ship(new Quantity(5));
+        assertThat(stock.getQuantity()).isEqualTo(95);
+        assertThat(stock.getReservedQuantity()).isEqualTo(0);
+    }
+}
+```
+
+**🟢 Step 2: `SHIPPED` ステータス → `Reservation.ship()` → `Stock.ship()` の順で実装**
+
+---
+
+#### UC-03 入荷登録のTDDフロー
+
+**🔴 Step 1: `Stock.restock()` のテストを先に書く**
+
+```java
+// StockTest.java
+@Test
+void 入荷で在庫数が増える() {
+    Stock stock = new Stock(new ProductId("P-001"), 100, 5);
+    stock.restock(new Quantity(50));
+    assertThat(stock.getQuantity()).isEqualTo(150);
+}
+
+// StockReceiptTest.java
+@Test
+void 入荷伝票を生成できる() {
+    StockReceipt receipt = StockReceipt.create(new ProductId("P-001"), new Quantity(50));
+    assertThat(receipt.getProductId().value()).isEqualTo("P-001");
+    assertThat(receipt.getQuantity().value()).isEqualTo(50);
+}
+```
+
+---
+
+#### UC-05 在庫調整のTDDフロー（ドメインイベント入門）
+
+**🔴 Step 1: イベントが発行されることをテストする**
+
+```java
+// StockTest.java
+@Test
+void 在庫調整でイベントが発行される() {
+    Stock stock = new Stock(new ProductId("P-001"), 100, 5);
+    AdjustmentReason reason = new AdjustmentReason(AdjustmentType.DAMAGE, "水濡れ");
+
+    stock.adjust(new Quantity(80), reason);
+
+    List<DomainEvent> events = stock.getDomainEvents();
+    assertThat(events).hasSize(1);
+    assertThat(events.get(0)).isInstanceOf(StockAdjustedEvent.class);
+
+    StockAdjustedEvent event = (StockAdjustedEvent) events.get(0);
+    assertThat(event.afterQuantity().value()).isEqualTo(80);
+}
+```
+
+---
+
 ## 実装する順番（推奨）
 
 ```
 Step 1: UC-01  Quantity値オブジェクトの作成・既存コードへの適用
+           └─ TDD: QuantityTest → Quantity実装 → Stock/Reservation修正
            └─ 変更ファイル: Stock, Reservation, ReservationDomainService, UseCases
 
 Step 2: UC-02  出荷確定
+           └─ TDD: ReservationTest(ship) → StockTest(ship) → UseCase実装
            └─ 変更ファイル: ReservationStatus(+SHIPPED), Reservation(+ship), Stock(+ship)
               追加ファイル: ShipStockUseCase
 
 Step 3: UC-03  入荷登録
+           └─ TDD: StockTest(restock) → StockReceiptTest → UseCase実装
            └─ 追加ファイル: StockReceipt, ReceiptId, StockReceiptRepository, RestockUseCase
               変更ファイル: Stock(+restock)
 
 Step 4: UC-04  商品登録
+           └─ TDD: ProductNameTest(バリデーション) → ProductTest → UseCase実装
            └─ 追加ファイル: Product, ProductName, Price, ProductRepository, RegisterProductUseCase
 
 Step 5: UC-05  在庫調整
+           └─ TDD: StockTest(adjust+イベント) → AdjustmentReason → UseCase実装
            └─ 追加ファイル: AdjustmentReason, StockAdjustedEvent
               変更ファイル: Stock(+adjust)
 
 Step 6: UC-06  在庫不足アラート
+           └─ TDD: StockTest(reserve後イベント確認) → Handler実装
            └─ 追加ファイル: AlertThreshold, StockLowEvent, StockLowEventHandler
               変更ファイル: Stock(reserve内にイベント発行)
 ```
